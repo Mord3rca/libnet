@@ -1,0 +1,72 @@
+#ifndef LIBNET_TCP_EVENT_H
+#define LIBNET_TCP_EVENT_H
+
+#include <stdexcept>
+
+#include <string>
+#include <vector>
+#include <map>
+
+#include <atomic>
+
+extern "C"
+{
+  #include <sys/epoll.h>
+  
+  #include <arpa/inet.h>
+  #include <sys/types.h>
+  #include <sys/socket.h>
+  #include <netdb.h>
+  
+  #include <fcntl.h>
+  
+  #include <unistd.h>
+}
+
+static bool sock_non_block(int) noexcept;
+
+namespace tcp
+{
+  class Server
+  {
+  public:
+    Server();
+    Server(const std::string&, const unsigned int);
+    
+    ~Server();
+    
+    void bind(const std::string&, const unsigned int);
+    
+    void start();
+    void stop()
+    {m_run = false;}
+    
+    bool isRunning() const noexcept
+    {return m_run;}
+    
+    unsigned int maxConnection() const noexcept
+    {return m_maxconn;}
+    void maxConnection( unsigned int );
+    
+    ssize_t buffSize() const noexcept
+    {return m_buffsize;}
+    void buffSize( unsigned int );
+    
+    virtual void OnConnect(int, const std::string&, const unsigned int){}
+    virtual void OnReceived(int, const char*, ssize_t);
+    virtual void OnError(int, const std::string&){}
+    virtual void OnDisconnect(int){}
+    
+  private:
+    int m_sockfd, m_pollfd;
+    std::atomic<bool> m_run;
+    unsigned int m_maxconn;
+    char* m_buff; ssize_t m_buffsize;
+    
+    void _tcp_create( int );
+    void _tcp_close( int );
+    void _gethostinfo(struct sockaddr&, std::string&, int&);
+  };
+}
+
+#endif //LIBNET_TCP_EVENT_H
