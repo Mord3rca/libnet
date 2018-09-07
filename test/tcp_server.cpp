@@ -5,7 +5,7 @@
 
 tcp::Server *serv;
 
-int sig_handler(int sig)
+void sig_handler(int sig)
 {
   switch(sig)
   {
@@ -14,11 +14,12 @@ int sig_handler(int sig)
       break;
     default:;
   }
-  return 0;
 }
 
 int main(int argc, char **argv)
 {
+  signal(SIGINT, sig_handler);
+  
   serv = new tcp::Server("127.0.0.1", 6666);
   serv->buffSize( 512 );
   serv->maxConnection( 5 );
