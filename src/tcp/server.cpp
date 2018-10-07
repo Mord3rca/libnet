@@ -1,4 +1,4 @@
-#include "server"
+#include "tcp/server"
 
 tcp::Server::Server() :  m_sockfd(-1), m_maxconn(64), m_run(false)
 {}
@@ -6,7 +6,7 @@ tcp::Server::Server() :  m_sockfd(-1), m_maxconn(64), m_run(false)
 tcp::Server::Server(const std::string &ip, const unsigned int port) : Server()
 { this->bind(ip, port); }
     
-tcp::Server::~Server() {}
+tcp::Server::~Server() { stop(); }
     
 void tcp::Server::bind(const std::string &ip, const unsigned int port)
 {

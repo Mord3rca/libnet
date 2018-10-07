@@ -20,8 +20,8 @@ extern "C"
   #include <poll.h>
 }
 
-#include "utils"
-#include "worker"
+#include "tcp/utils"
+#include "tcp/worker"
 
 namespace tcp
 {

@@ -9,6 +9,8 @@
 
 #include <ctime> //time()
 
+#include <vector>
+
 #include <algorithm>
 
 extern "C"
@@ -17,7 +19,7 @@ extern "C"
   #include <sys/epoll.h> //epoll_create1(), epoll_ctl()
 }
 
-#include "utils"
+#include "tcp/utils"
 
 class IEventWorker
 {
