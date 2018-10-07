@@ -1,0 +1,11 @@
+#ifndef LIBNET_UTILS_HEADER
+#define LIBNET_UTILS_HEADER
+
+extern "C"
+{
+  #include <fcntl.h>
+}
+
+bool sock_non_block(int fd) noexcept;
+
+#endif //LIBNET_UTILS_HEADER

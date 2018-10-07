@@ -1,0 +1,299 @@
+#ifndef LIBNET_WORKER_HEADER
+#define LIBNET_WORKER_HEADER
+
+#include <stdexcept>
+
+#include <atomic>
+#include <thread>
+#include <mutex>
+
+#include <ctime> //time()
+
+#include <algorithm>
+
+extern "C"
+{
+  #include <unistd.h>
+  
+  #include <sys/poll.h>  //Will be used.
+  #include <sys/epoll.h> //epoll_create1(), epoll_ctl()
+}
+
+#include "utils"
+
+class IEventWorker
+{
+public:
+  IEventWorker(){}
+  virtual ~IEventWorker(){};
+  
+  virtual void setListeningSock( int ) = 0;
+  virtual void createNewItemFromFd( int, const struct sockaddr& ) = 0;
+  virtual void setBuffSize( size_t ) = 0;
+  virtual void setTimeOut( time_t ) = 0;
+  
+  virtual void start() = 0;
+  virtual void threaded_start() = 0;
+  
+  virtual void stop () = 0;
+  
+  virtual const size_t getClientNumber() = 0;
+};
+
+namespace tcp
+{
+  template<typename T>
+  class ePollWorker : public IEventWorker
+  {
+    struct ePollPtr
+    {
+      ePollPtr( int _fd )
+      {
+        fd = _fd;
+        obj = new T(fd);
+        last_activity = time(nullptr);
+      }
+      
+      int fd; T* obj;
+      time_t last_activity;
+    };
+    
+  public:
+    ePollWorker() : m_pollfd(-1), m_sockfd(-1),
+                    m_buffsize(512), m_timeout(60),
+                    m_run(false), m_th(nullptr)
+    {}
+    
+    ~ePollWorker()
+    {
+      stop();
+      //Deleting all objects
+      for( auto i : m_items )
+      {
+        delete i->obj; delete i;
+      }
+      
+      //Closing special FD if set.
+      if( m_pollfd != -1 ) ::close(m_pollfd);
+      if( m_sockfd != -1 ) ::close(m_sockfd);
+      
+      if(m_th) delete m_th;
+    }
+    
+    void setListeningSock( int fd )
+    { if(!m_run) m_sockfd = fd; }
+    
+    void setBuffSize( size_t size )
+    { if(!m_run) m_buffsize = size; }
+    
+    void setTimeOut( time_t timeout )
+    { if(m_run) m_timeout = timeout; }
+    
+    void createNewItemFromFd( int fd, const struct sockaddr &addr)
+    {
+      auto item = createItem(fd);
+      
+      std::string ip; int port = 0;
+      _gethostinfo(addr, ip, port);
+      OnConnect(item->obj, ip, port);
+    }
+    
+    void start()
+    { loop(); }
+    
+    void threaded_start()
+    { m_th = new std::thread( &ePollWorker<T>::loop, this ); }
+    
+    void stop()
+    {
+      m_run.store(false);
+      
+      if(m_th && m_th->joinable())
+        m_th->join();
+      
+      delete m_th; m_th = nullptr;
+    }
+    
+    const size_t getClientNumber()
+    {
+      return m_items.size();
+    }
+    
+    virtual void OnConnect(T*, const std::string&, int){}
+    virtual void OnReceived(T*, const char *buff, size_t size){}
+    virtual void OnDisconnect(T*){}
+    
+    virtual void OnError(T*, const std::string&){}
+    
+  private:
+    int m_pollfd, m_sockfd;
+    size_t m_buffsize;
+    time_t m_timeout;
+    
+    std::atomic<bool> m_run;
+    std::thread *m_th;
+    std::mutex m_mtx;
+    
+    //Function managing items
+    std::vector< ePollPtr* > m_items;
+    
+    void loop()
+    {
+      m_run = true;
+      //Creating epoll special Fd
+      m_pollfd = epoll_create1(0);
+      if(m_pollfd == -1)
+        std::runtime_error("ePollWorker: epoll_create1() failed");
+      
+      ePollPtr *sockitem = (m_sockfd != -1) ? createItem( m_sockfd, true) : nullptr;
+      
+      struct epoll_event *events = new epoll_event[64];
+      char *buffer = new char[m_buffsize];
+      time_t last_timeout_check = time(nullptr);
+      
+      while(m_run)
+      {
+        int n = epoll_wait( m_pollfd, events, 64, 500 );
+        for( int i = 0; i < n; i++ )
+        {
+          auto item = static_cast<ePollPtr*>(events[i].data.ptr);
+          
+          if( events[i].events & EPOLLERR ||
+              !(events[i].events & EPOLLIN) )
+          {
+            OnError(item->obj, "Polling error: Object pulled without event.");
+            deleteItem(item);
+          }
+          //Incomming clients on sock listener
+          else if(item == sockitem )
+          {
+            while(true)
+            {
+              struct sockaddr addr; socklen_t addr_len = sizeof(struct sockaddr);
+              int fd = accept(item->fd, &addr, &addr_len);
+              
+              if(fd == -1)
+              {
+                if( errno != EAGAIN && errno != EWOULDBLOCK )
+                  throw std::runtime_error("ePollWorker: listen() error");
+                else
+                  break;
+              }
+              
+              createNewItemFromFd(fd, addr);
+            }
+            continue;
+          }
+          //Disconnected
+          else if( events[i].events & EPOLLHUP )
+          {
+            deleteItem(item);
+          }
+          else
+          {
+            while(true)
+            {
+              ssize_t count = read(item->fd, buffer, m_buffsize);
+              
+              if( count == -1 )
+              {
+                if( errno != EAGAIN )
+                  std::runtime_error("ePollWorker: read() error");
+                
+                break;
+              }
+              else if(count == 0)
+              {
+                deleteItem(item);
+                break;
+              }
+              
+              OnReceived(item->obj, buffer, count);
+            }
+            
+            item->last_activity = time(nullptr);
+          }
+        }
+        
+        //Check For timed out items every 5 seconds
+        if( (time(nullptr) - 5) > last_timeout_check )
+        {
+          _checkTimeout();
+          last_timeout_check = time(nullptr);
+        }
+      }
+      
+      //Cleaning up.
+      delete[] buffer;
+      delete[] events;
+      
+      if( sockitem ) { deleteItem(sockitem, true); m_sockfd = -1; }
+      ::close( m_pollfd ); m_pollfd = -1;
+    }
+    
+    ePollPtr* createItem( int fd, bool internal = false )
+    {
+      std::unique_lock<std::mutex> lck(m_mtx);
+      struct epoll_event event;
+      auto new_item = new ePollPtr(fd);
+      
+      sock_non_block(fd);
+      
+      //Add Event to epoll event watcher
+      event.data.ptr = new_item;
+      event.events = EPOLLIN | EPOLLET;
+      epoll_ctl(m_pollfd, EPOLL_CTL_ADD, fd, &event);
+      
+      //Register obj in Worker Items
+      if(!internal)
+        m_items.push_back( new_item );
+      
+      return new_item;
+    }
+    
+    void deleteItem( ePollPtr *item, bool internal = false )
+    {
+      std::unique_lock<std::mutex> lck(m_mtx);
+      if(!internal)
+        OnDisconnect( item->obj );
+      
+      //Unregister from ePoll & closing
+      epoll_ctl(m_pollfd, EPOLL_CTL_DEL, item->fd, nullptr);
+      ::close( item->fd );
+      
+      //Unregister from Worker Items
+      if(!internal)
+      {
+        auto i = std::find( m_items.begin(), m_items.end(), item );
+        if( i != m_items.end() )
+          m_items.erase( i );
+      }
+      
+      delete item->obj; delete item;
+    }
+    
+    void _checkTimeout()
+    {
+      time_t curTime = time(nullptr);
+      for(auto i : m_items)
+      {
+        if( curTime - i->last_activity > m_timeout )
+          deleteItem(i);
+      }
+    }
+    
+    void _gethostinfo(const struct sockaddr &addr, std::string &ip, int &port)
+    {
+      char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
+      getnameinfo(&addr, sizeof(addr),
+                  hbuf, sizeof(hbuf),
+                  sbuf, sizeof(sbuf),
+                  NI_NUMERICHOST | NI_NUMERICSERV);
+      
+      ip = hbuf;
+      port = std::atoi(sbuf);
+    }
+  };
+}
+
+#endif //LIBNET_WORKER_HEADER

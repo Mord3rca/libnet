@@ -1,147 +1,98 @@
 #include "server"
 
-bool sock_non_block(int fd) noexcept
+tcp::Server::Server() :  m_sockfd(-1), m_maxconn(64), m_run(false)
+{}
+    
+tcp::Server::Server(const std::string &ip, const unsigned int port) : Server()
+{ this->bind(ip, port); }
+    
+tcp::Server::~Server() {}
+    
+void tcp::Server::bind(const std::string &ip, const unsigned int port)
 {
-  int flags = fcntl( fd, F_GETFL, 0 );
-  if(flags == -1)
-    return false;
-  
-  flags |= O_NONBLOCK;
-  if( fcntl( fd, F_SETFL, flags ) == -1 )
-    return false;
-  
-  return true;
-}
+  struct sockaddr_in addr;
+  addr.sin_family = AF_INET;
+  addr.sin_port   = htons(port);
+  addr.sin_addr.s_addr = inet_addr(ip.c_str());
 
-template<>
-void tcp::Server<int>::OnReceived( void *ptr, const char* buff, ssize_t count)
-{
-  int fd = *( static_cast<int*>(ptr) );
-  ::write(fd, buff, count);
-}
+  m_sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if( m_sockfd < 0 )
+    throw std::runtime_error("socket(): error");
+      
+  int turnon = 1;
+  setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &turnon, sizeof(turnon));
+  
+  if( ::bind(m_sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0 )
+    throw std::runtime_error("bind(): error");
+      
+  if( listen(m_sockfd, m_maxconn) < 0 )
+    throw std::runtime_error("listen(): error");
 
-template<>
-struct tcp::Server<int>::Worker::container* tcp::Server<int>::Worker::create( int fd )
-{
-  if( !sock_non_block(fd) )
+  if( !sock_non_block(m_sockfd) )
     throw std::runtime_error("sock_non_block(): error");
-  
-  struct epoll_event event;
-  auto *obj = new tcp::Server<int>::Worker::container(fd, nullptr);
-  event.data.ptr = obj;
-  event.events = EPOLLIN | EPOLLET;
-  if( epoll_ctl(root->m_pollfd, EPOLL_CTL_ADD, fd, &event) == -1 )
-    throw std::runtime_error("epoll_ctl() error");
-  
-  m_clients.push_back(obj);
-  
-  return nullptr;
 }
 
-template<>
-void tcp::Server<int>::Worker::close( struct tcp::Server<int>::Worker::container *ptr )
+void tcp::Server::start()
 {
-  epoll_ctl(root->m_pollfd, EPOLL_CTL_DEL, ptr->fd, nullptr);
-  ::close(ptr->fd);
-  
-  auto i = std::find(m_clients.begin(), m_clients.end(), ptr);
-  if( i != m_clients.end() )
-    m_clients.erase(i);
-  
-  delete ptr;
-}
-
-template<>
-void tcp::Server<int>::Worker::loop()
-{
-  struct epoll_event *events;
-  
-  events = new struct epoll_event[64];
-  
-  root->m_pollfd = epoll_create1(0);
-  if( root->m_pollfd == -1 )
-    throw std::runtime_error("epoll_create1(): Error");
-  
-  create( root->m_sockfd );
-  
-  if(!m_buff) m_buff = new char[root->m_buffsize];
-  
-  root->m_run = true; m_last_timeout_check = time(nullptr);
-  while(root->m_run)
+  m_run = true;
+  //No Thread
+  if( m_workers.size() == 1 )
   {
-    int n = epoll_wait( root->m_pollfd, events, 64, 500 );
-    for( int i = 0; i < n; i++ )
-    {
-      auto *con_ptr = static_cast<struct tcp::Server<int>::Worker::container*>(events[i].data.ptr);
-      if( (events[i].events & EPOLLERR) ||
-          (events[i].events & EPOLLHUP) ||
-          !(events[i].events & EPOLLIN) )
-      {
-        root->OnError(&con_ptr->fd, "Polling error: Object pulled without event.");
-        close(con_ptr);
-        continue;
-      }
-      else if( con_ptr->fd == root->m_sockfd )
-      {
-        while(true)
-        {
-          struct sockaddr in_addr; socklen_t in_len = sizeof(struct sockaddr);
-          int infd;
-          
-          infd = accept( root->m_sockfd, &in_addr, &in_len );
-          if( infd == -1 )
-          {
-            if( (errno == EAGAIN) ||
-                (errno == EWOULDBLOCK) )
-              break;
-            else
-              throw std::runtime_error("accept() error in event loop.");
-          }
-          
-          create(infd);
-          
-          std::string ip; int port;
-          gethostinfo(in_addr, ip, port);
-          
-          root->OnConnect(&infd, ip, port);
-        }
-        continue;
-      }
-      else if( events[i].events & EPOLLHUP )
-      {
-        {root->OnDisconnect(&con_ptr->fd);}
-        close(con_ptr);
-      }
-      else
-      {
-        while(true)
-        {
-          ssize_t count = read(con_ptr->fd, m_buff, root->m_buffsize);
-          
-          if( count == -1)
-          {
-            if( errno != EAGAIN )
-              throw std::runtime_error("TCP Event Loop: read() error");
-            
-            break;
-          }
-          else if( count == 0 )
-          {
-            {root->OnDisconnect(&con_ptr->fd);}
-            close(con_ptr);
-            break;
-          }
-          
-          {root->OnReceived(&con_ptr->fd, m_buff, count);}
-        }
-      }
-      con_ptr->last_event = time(nullptr);
-    }
-    _checkTimeout();
+    m_workers[0]->setListeningSock(m_sockfd);
+    m_workers[0]->start();
   }
+  //Threaded Operation
+  else if( m_workers.size() > 1 )
+  {
+    for(auto i : m_workers)
+      i->threaded_start();
+    
+    int fd; struct sockaddr addr; socklen_t addr_len = sizeof(addr);
+    
+    struct pollfd pollfds[1];
+    pollfds[0].fd = m_sockfd;
+    pollfds[0].events = POLLIN;
+    
+    while( m_run )
+    {
+      int ret = poll(pollfds, 1, 500);
+      
+      if( ret > 0 )
+      {
+        fd = accept(m_sockfd, &addr, &addr_len);
+        _distribute()->createNewItemFromFd(fd, addr);
+      }
+      else if( ret == -1 && errno != EINTR)
+        throw std::runtime_error("tcp::Server: poll() error");
+    }
+  }
+  else
+    std::runtime_error("tcp::Server: No Worker Set.");
+}
+void tcp::Server::stop()
+{
+  m_run = false;
+  for(auto i : m_workers)
+  {
+    i->stop();
+    delete i;
+  }
+}
+    
+bool tcp::Server::isRunning() const noexcept
+{return m_run;}
+    
+void tcp::Server::addWorker( IEventWorker* worker)
+{ if(!m_run) m_workers.push_back(worker); }
+    
+void tcp::Server::setMaxConnection(int maxconn) noexcept
+{ if(!m_run) m_maxconn = maxconn; }
+
+IEventWorker* tcp::Server::_distribute( void )
+{
+  auto i = m_workers[0];
+  for( size_t j = 1; j < m_workers.size(); j++ )
+    i = (m_workers[j]->getClientNumber() < i->getClientNumber()) ? m_workers[j] : i;
   
-  delete[] events;
-  ::close(root->m_pollfd);
-  ::close(root->m_sockfd);
-  root->m_sockfd = -1;
+  return i;
 }

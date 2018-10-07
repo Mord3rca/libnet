@@ -5,292 +5,52 @@
 
 #include <string>
 #include <vector>
-#include <map>
 
 #include <atomic>
 
 #include <ctime>
 
-#include <algorithm>
-
 extern "C"
 {
-  #include <sys/epoll.h>
-  
   #include <arpa/inet.h>
   #include <sys/types.h>
   #include <sys/socket.h>
   #include <netdb.h>
   
-  #include <fcntl.h>
-  
-  #include <unistd.h>
+  #include <poll.h>
 }
 
-bool sock_non_block(int) noexcept;
+#include "utils"
+#include "worker"
 
 namespace tcp
 {
-  template<typename T>
   class Server
   {
-    friend class Worker;
-    class Worker
-    {
-      struct container
-      {
-        container(int _fd, T *_ptr) : fd(_fd), ptr(_ptr), last_event(time(nullptr)) {}
-        int fd;
-        T* ptr;
-        
-        time_t last_event;
-      };
-    public:
-      Worker(Server *_root) : root(_root), m_buff(nullptr) {}
-      ~Worker(){ if(m_buff) delete [] m_buff;}
-      void loop();
-      
-    private:
-      struct container* create( int );
-      void close( struct container* );
-      
-      Server *root; char* m_buff;
-      void gethostinfo(struct sockaddr &addr, std::string &ip, int &port)
-      {
-        char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
-        getnameinfo(&addr, sizeof(addr),
-                    hbuf, sizeof(hbuf),
-                    sbuf, sizeof(sbuf),
-                    NI_NUMERICHOST | NI_NUMERICSERV);
-        
-        ip = hbuf;
-        port = std::atoi(sbuf);
-      }
-      
-      time_t m_last_timeout_check;
-      void _checkTimeout();
-      
-      std::vector<container*> m_clients;
-    };
-    
   public:
-    Server() :  m_sockfd(-1), m_pollfd(-1),
-                m_run(false), m_maxconn(64),
-                m_buffsize(2048),
-                m_timeout(60) 
-    {}
+    Server();
+    Server(const std::string &ip, const unsigned int port);
     
-    Server(const std::string &ip, const unsigned int port) : Server()
-    { this->bind(ip, port); }
+    ~Server();
     
-    ~Server() {}
+    void bind(const std::string &ip, const unsigned int port);
     
-    void bind(const std::string &ip, const unsigned int port)
-    {
-      struct sockaddr_in addr;
-        addr.sin_family = AF_INET;
-        addr.sin_port   = htons(port);
-        addr.sin_addr.s_addr = inet_addr(ip.c_str());
-      
-      m_sockfd = socket(AF_INET, SOCK_STREAM, 0);
-      if( m_sockfd < 0 )
-        throw std::runtime_error("socket(): error");
-      
-      int turnon = 1;
-      setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &turnon, sizeof(turnon));
-      
-      if( ::bind(m_sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0 )
-        throw std::runtime_error("bind(): error");
-      
-      if( listen(m_sockfd, m_maxconn) < 0 )
-        throw std::runtime_error("listen(): error");
-      
-      if( !sock_non_block(m_sockfd) )
-        throw std::runtime_error("sock_non_block(): error");
-    }
+    void start();
+    void stop();
     
-    void start()
-    {
-      auto worker = new Worker(this);
-      worker->loop();
-      
-      delete worker;
-    }
-    void stop()
-    {m_run = false;}
+    bool isRunning() const noexcept;
     
-    bool isRunning() const noexcept
-    {return m_run;}
+    void addWorker( IEventWorker* worker);
     
-    unsigned int maxConnection() const noexcept
-    {return m_maxconn;}
-    void maxConnection( unsigned int conn)
-    { if( !m_run ) m_maxconn = conn; }
-    
-    ssize_t buffSize() const noexcept
-    {return m_buffsize;}
-    void buffSize( unsigned int size)
-    { if( !m_run ) m_buffsize = size; }
-    
-    unsigned int timeout()
-    {return m_timeout;}
-    void timeout( unsigned int _timeout )
-    { if(!m_run) m_timeout = _timeout; }
-    
-    virtual void OnConnect(void*, const std::string&, const unsigned int){}
-    virtual void OnReceived(void*, const char*, ssize_t){}
-    virtual void OnError(void*, const std::string&){}
-    virtual void OnDisconnect(void*){}
+    void setMaxConnection(int maxconn) noexcept;
     
   private:
-    int m_sockfd, m_pollfd;
+    int m_sockfd, m_maxconn;
     std::atomic<bool> m_run;
-    unsigned int m_maxconn;
-    ssize_t m_buffsize;
-    unsigned int m_timeout;
-  };
-}
-
-template<typename T>
-struct tcp::Server<T>::Worker::container* tcp::Server<T>::Worker::create( int fd )
-{
-  if( !sock_non_block(fd) )
-    throw std::runtime_error("sock_non_block(): error");
-  
-  struct epoll_event event;
-  auto *obj_con = new container(fd, ( fd != root->m_sockfd ) ? new T(fd) : nullptr );
-  event.data.ptr = obj_con;
-  event.events = EPOLLIN | EPOLLET;
-  if( epoll_ctl(root->m_pollfd, EPOLL_CTL_ADD, fd, &event) == -1 )
-    throw std::runtime_error("epoll_ctl() error");
-  
-  m_clients.push_back(obj_con);
-  
-  return static_cast<struct tcp::Server<T>::Worker::container*>(event.data.ptr);
-}
-
-template<typename T>
-void tcp::Server<T>::Worker::close( struct container *ptr )
-{
-  epoll_ctl(root->m_pollfd, EPOLL_CTL_DEL, ptr->fd, nullptr);
-  ::close(ptr->fd);
-  
-  auto i = std::find(m_clients.begin(), m_clients.end(), ptr);
-  if( i != m_clients.end() )
-    m_clients.erase(i);
-  
-  delete ptr->ptr; delete ptr;
-}
-
-template<typename T>
-void tcp::Server<T>::Worker::loop()
-{
-  struct epoll_event *events = new struct epoll_event[64];
-  
-  root->m_pollfd = epoll_create1(0);
-  if( root->m_pollfd == -1 )
-    throw std::runtime_error("epoll_create1(): Error");
-  
-  create( root->m_sockfd );
-  
-  if(!m_buff) m_buff = new char[root->m_buffsize];
-  
-  root->m_run = true; m_last_timeout_check = time(nullptr);
-  while(root->m_run)
-  {
-    int n = epoll_wait( root->m_pollfd, events, 64, 500 );
-    for( int i = 0; i < n; i++ )
-    {
-      auto *ptr_con = static_cast<struct container*>(events[i].data.ptr);
-      if( (events[i].events & EPOLLERR) ||
-          !(events[i].events & EPOLLIN) )
-      {
-        root->OnError(ptr_con->ptr, "Polling error: Object pulled without event.");
-        close( ptr_con );
-        continue;
-      }
-      else if( ptr_con->fd == root->m_sockfd )
-      {
-        while(true)
-        {
-          struct sockaddr in_addr; socklen_t in_len = sizeof(struct sockaddr);
-          int infd;
-          
-          infd = accept( root->m_sockfd, &in_addr, &in_len );
-          if( infd == -1 )
-          {
-            if( (errno == EAGAIN) ||
-                (errno == EWOULDBLOCK) )
-              break;
-            else
-              throw std::runtime_error("accept() error in event loop.");
-          }
-          
-          ptr_con = create(infd);
-          
-          std::string ip; int port;
-          gethostinfo(in_addr, ip, port);
-          
-          root->OnConnect(ptr_con->ptr, ip, port);
-        }
-        continue;
-      }
-      else if( events[i].events & EPOLLHUP )
-      {
-        {root->OnDisconnect(ptr_con->ptr);}
-        close( ptr_con );
-      }
-      else
-      {
-        while(true)
-        {
-          ssize_t count = read(ptr_con->fd, m_buff, root->m_buffsize);
-          
-          if( count == -1)
-          {
-            if( errno != EAGAIN )
-              throw std::runtime_error("TCP Event Loop: read() error");
-            
-            break;
-          }
-          else if( count == 0 )
-          {
-            {root->OnDisconnect(ptr_con->ptr);}
-            close(ptr_con);
-            break;
-          }
-          
-          {root->OnReceived(ptr_con->ptr, m_buff, count);}
-        }
-      }
-      ptr_con->last_event = time( nullptr );
-    }
+    std::vector<IEventWorker*> m_workers;
     
-    _checkTimeout();
-  }
-  
-  delete[] events;
-  ::close(root->m_pollfd);
-  ::close(root->m_sockfd);
-  root->m_sockfd = -1;
-}
-
-template<class T>
-void tcp::Server<T>::Worker::_checkTimeout()
-{
-  //TODO: Smarter timeout check.
-  if( (time(nullptr) - m_last_timeout_check) > 5  ) //Check every 5s (from the magic number hat)
-  {
-    for(auto i : m_clients)
-    {
-      if( i->fd != root->m_sockfd && ( time(nullptr) - i->last_event ) > root->m_timeout )
-      {
-        {root->OnDisconnect(i->ptr);}
-        close(i);
-      }
-    }
-    m_last_timeout_check = time(nullptr);
-  }
+    IEventWorker* _distribute( void );
+  };
 }
 
 #endif //LIBNET_TCP_EVENT_H

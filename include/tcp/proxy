@@ -1,0 +1,90 @@
+#ifndef LIBNET_PROXY_HEADER
+#define LIBNET_PROXY_HEADER
+
+#include <stdexcept>
+
+#include <string>
+
+#include <thread>
+#include <atomic>
+
+#include <ctime>
+
+#include <algorithm>
+
+extern "C"
+{
+  #include <sys/socket.h>
+  #include <sys/types.h>
+  #include <arpa/inet.h>
+  
+  #include <unistd.h>
+  #include <string.h>
+  
+  #include <poll.h>
+}
+
+namespace tcp
+{
+  class Proxy
+  {
+    class Worker
+    {
+    public:
+      struct client_info
+      {
+        int client_fd, endpoint_fd;
+        //T* obj;
+      };
+    public:
+      Worker(int, int);
+      ~Worker();
+      
+    private:
+      int pollfd;
+      void create();
+      void close();
+    };
+    
+  public:
+    Proxy();
+    ~Proxy();
+    
+    void bind( const std::string&, unsigned int );
+    
+    void start();
+    void stop();
+    
+    void timeout( unsigned int timeout )
+    { if(!m_run) m_timeout = timeout;}
+    unsigned int timeout() const noexcept
+    {return m_timeout;}
+    
+    void buffersize(size_t buffsize)
+    { if(!m_run) m_buffersize = buffsize; }
+    size_t bufferSize() const noexcept
+    {return m_buffersize;}
+    
+    void maxConnection( unsigned int maxconn)
+    { if( !m_run ) m_maxconn = maxconn; }
+    unsigned int maxConnection() const noexcept
+    {return m_maxconn;}
+    
+    bool isRunning() const noexcept
+    { return m_run; }
+    void wait() const;
+    
+    virtual void OnConnect( const Worker::client_info& );
+    virtual void OnReceived(const Worker::client_info&, const char*, size_t);
+    virtual void OnSend( const Worker::client_info&, const char*, size_t);
+    virtual void OnError( const Worker::client_info&, const std::string&);
+    virtual void OnDisconnect( const Worker::client_info& );
+    
+  private:
+    int m_proxyfd; std::atomic<bool> m_run;
+    int m_maxconn; time_t m_timeout;
+    size_t m_buffersize;
+  };
+}
+
+#endif //LIBNET_PROXY_HEADER
