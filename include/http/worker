@@ -1,0 +1,33 @@
+#ifndef LIBNET_HTTP_WORKER_HEADER
+#define LIBNET_HTTP_WORKER_HEADER
+
+#include <http/server>
+#include <tcp/worker>
+
+#include <iostream>
+
+namespace http
+{
+  class Worker : public tcp::ePollWorker<Client>
+  {
+  public:
+    Worker();
+    ~Worker();
+    
+    //TCP Callbacks
+    void OnConnect(Client*, const std::string&, int) override;
+    void OnReceived(Client*, const char*, size_t) override;
+    void OnDisconnect(Client*) override;
+    
+    void OnError(Client*, const std::string&) override;
+    
+    //HTTP Callbacks
+    virtual void OnPost(Client&, const Request&);
+    virtual void OnGet(Client&, const Request&);
+    
+  private:
+    void _http_close_request(http::Client*);
+  };
+}
+
+#endif //LIBNET_HTTP_WORKER_HEADER

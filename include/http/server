@@ -1,0 +1,140 @@
+#ifndef LIBNET_HTTP_SERVER_HEADER
+#define LIBNET_HTTP_SERVER_HEADER
+
+#include <iostream>
+#include <string>
+#include <map>
+
+#include <sstream>
+
+extern "C"
+{
+  #include <unistd.h> //write()
+}
+
+namespace http
+{
+  void unescape(std::string&);
+  
+  enum class method
+  {
+    GET, POST, UNKNOWN
+  };
+  
+  enum class status_code
+  {
+    OK=200,
+    MOVED_PERMANENTLY=301,
+    FORBIDDEN=403, NOT_FOUND=404,
+    INTERNAL_SERVER_ERROR=500
+  };
+  
+  class Request
+  {
+    friend class Parser;
+  public:
+    Request() : m_method(method::UNKNOWN), m_datalen(0), m_isHeaderComplete(false)
+    {}
+    
+    const std::string   getPath() const noexcept
+    {return m_uri;}
+    
+    const http::method  getMethod() const noexcept
+    {return m_method;}
+    
+    const std::string   getVariable(const std::string &name) const noexcept
+    {
+      auto i = m_vars.find(name);
+      return (i != m_vars.end() ? i->second : "" );
+    }
+    
+    bool   isVarExist(const std::string &name) const noexcept
+    { return m_vars.find(name) != m_vars.end(); }
+    
+    const std::string   getHeader(const std::string &name) const noexcept
+    {
+      auto i = m_headers.find(name);
+      return (i != m_headers.end() ? i->second : "");
+    }
+    const std::string   getCookie(const std::string &name) const noexcept
+    {
+      auto i = m_cookies.find(name);
+      return (i != m_cookies.end() ? i->second : "");
+    }
+    
+    const std::string& getData() const noexcept
+    {return m_data;}
+    
+    const ssize_t getDataLength() const noexcept
+    {return m_datalen;}
+    
+  private:
+    std::map<std::string, std::string> m_headers, m_cookies, m_vars;
+    std::string m_uri, m_data;
+    http::method m_method;
+    
+    size_t m_datalen; bool m_isHeaderComplete;
+  };
+  
+  class Response
+  {
+    friend class Client;
+  public:
+    Response();
+    Response(const status_code, const std::map<std::string, std::string>, const std::string);
+    
+    void setStatusCode(enum http::status_code );
+    
+    void addHeader(const std::string&, const std::string&);
+    void removeHeader(const std::string&);
+    
+    void appendData(const std::string&);
+    void clearData();
+    
+  private:
+    std::map<std::string, std::string> m_headers;
+    std::string m_data; http::status_code m_code;
+  };
+  
+  //Will be used for more advanced shit. Like Auth etc
+  class Client
+  {
+    friend class Worker;
+  public:
+    Client(int);
+    
+    Client& operator <<(const Response&);
+    Client& send(const Response&);
+    
+  private:
+    int m_fd;
+    Request* m_incomming;
+  };
+  
+  class Parser
+  {
+  public:
+    Parser();
+    Parser(Request*);
+    
+    ~Parser();
+    
+    void setRequest(Request*) noexcept;
+    void write(const char*, const ssize_t);
+    
+    bool isComplete() const noexcept;
+  private:
+    void _decodeVariable();
+    Request* m_target;
+  };
+  
+  static const std::array<http::Response, 4> genericAnswer = 
+  {
+    http::Response(http::status_code::OK, {{"Content-Type", "text/plain"}}, "OK"),
+    http::Response(http::status_code::NOT_FOUND, {{}}, ""),
+    http::Response(http::status_code::FORBIDDEN, {{}}, ""),
+    http::Response(http::status_code::INTERNAL_SERVER_ERROR, {{}}, "")
+  };
+}
+
+#endif //LIBNET_HTTP_SERVER_HEADER
