@@ -1,11 +1,19 @@
 #ifndef LIBNET_UTILS_HEADER
 #define LIBNET_UTILS_HEADER
 
+#include <string>
+
 extern "C"
 {
+  #include <sys/socket.h>
+  #include <netdb.h>
+  
+  #include <unistd.h>
+  
   #include <fcntl.h>
 }
 
 bool sock_non_block(int fd) noexcept;
+void gethostinfo(const struct sockaddr &addr, std::string &ip, int &port);
 
 #endif //LIBNET_UTILS_HEADER
