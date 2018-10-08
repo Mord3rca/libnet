@@ -77,6 +77,7 @@ void tcp::Server::stop()
     i->stop();
     delete i;
   }
+  m_workers.clear();
 }
     
 bool tcp::Server::isRunning() const noexcept
