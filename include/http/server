@@ -131,9 +131,9 @@ namespace http
   static const std::array<http::Response, 4> genericAnswer = 
   {
     http::Response(http::status_code::OK, {{"Content-Type", "text/plain"}}, "OK"),
-    http::Response(http::status_code::NOT_FOUND, {{}}, ""),
-    http::Response(http::status_code::FORBIDDEN, {{}}, ""),
-    http::Response(http::status_code::INTERNAL_SERVER_ERROR, {{}}, "")
+    http::Response(http::status_code::NOT_FOUND, {{"Content-Type", "text/plain"}}, "Object not found"),
+    http::Response(http::status_code::FORBIDDEN, {{"Content-Type", "text/plain"}}, "Access forbidden"),
+    http::Response(http::status_code::INTERNAL_SERVER_ERROR, {{"Content-Type", "text/plain"}}, "Internal Server Error")
   };
 }
 
